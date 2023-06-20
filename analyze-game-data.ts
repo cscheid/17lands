@@ -6,6 +6,9 @@ const games = Deno.readTextFileSync(`./processed-data/${format}_decks.jsonl`);
 const names = Deno.readTextFileSync(`./metadata/${format}_names.txt`).split(
   "\n",
 );
+const basicLands = new Set(
+  JSON.parse(Deno.readTextFileSync(`./metadata/${format}_lands.json`)),
+);
 
 type CardData = { count: number; outcome: number };
 
@@ -44,15 +47,24 @@ for (const line of games.split("\n")) {
   }
 }
 
-const wilsonScore = (p: number, n: number) => {
-  const z = 1.96;
+const wilsonScore = (p: number, n: number, z?: number, upper?: boolean) => {
+  if (z === undefined) {
+    z = 1.96;
+  }
   const phat = p / n;
-  return (phat + z * z / (2 * n) -
-    z * Math.sqrt((phat * (1 - phat) + z * z / (4 * n)) / n)) / (1 + z * z / n);
+  if (upper) {
+    return (phat + z * z / (2 * n) +
+      z * Math.sqrt((phat * (1 - phat) + z * z / (4 * n)) / n)) /
+      (1 + z * z / n);
+  } else {
+    return (phat + z * z / (2 * n) -
+      z * Math.sqrt((phat * (1 - phat) + z * z / (4 * n)) / n)) /
+      (1 + z * z / n);
+  }
 };
 
-const wilsonScoreFromData = (data: CardData) =>
-  wilsonScore(data.outcome, data.count);
+const wilsonScoreFromData = (data: CardData, z?: number, upper?: boolean) =>
+  wilsonScore(data.outcome, data.count, z, upper);
 
 console.log(`17l users win rate: ${totalOutcome / totalGames}`);
 console.log("\nCards:");
@@ -65,35 +77,74 @@ for (
   console.log(`${fmt(100 * card.outcome / card.count)}: ${names[Number(id)]}`);
 }
 
-const wilsonScoreFromDataPair = (key: number, data: CardData) => {
+const wilsonScoreFromDataPair = (
+  key: number,
+  data: CardData,
+  upper?: boolean,
+) => {
   const id1 = Math.floor(Number(key) / 1000);
   const id2 = Number(key) % 1000;
-  return wilsonScoreFromData(data) - (wilsonScoreFromData(cardData[id1]) +
-        wilsonScoreFromData(cardData[id2])) / 2;
+  const adjustedZ2 = 4;
+  const adjustedZ = 2;
+  return wilsonScoreFromData(data, adjustedZ2, upper) -
+    (wilsonScoreFromData(cardData[id1], adjustedZ, upper) +
+        wilsonScoreFromData(cardData[id2], adjustedZ, upper)) / 2;
 };
 
-console.log("\n\nCard pairs:");
-const threshold = 1000;
+const nonLandPairs = Object.entries(cardPairData)
+  .filter(([key, _]) => {
+    const id1 = Math.floor(Number(key) / 1000);
+    const id2 = Number(key) % 1000;
+    return !basicLands.has(id1) && !basicLands.has(id2);
+  });
+
+console.log("\n\nBest card pairs (skipping basics, adjusted for many pairs):");
 for (
-  const [key, card] of Object.entries(cardPairData).toSorted((a, b) =>
-    wilsonScoreFromDataPair(Number(a[0]), a[1]) -
-    wilsonScoreFromDataPair(Number(b[0]), b[1])
-  )
+  const [key, card] of nonLandPairs.toSorted((a, b) =>
+    wilsonScoreFromDataPair(Number(b[0]), b[1]) -
+    wilsonScoreFromDataPair(Number(a[0]), a[1])
+  ).slice(0, 50)
 ) {
-  if (card.count < threshold) {
-    continue;
-  }
   const id1 = Math.floor(Number(key) / 1000);
   const id2 = Number(key) % 1000;
   const ws = wilsonScoreFromDataPair(Number(key), card);
 
   const wsPure = ws +
-    (wilsonScoreFromData(cardData[id1]) + wilsonScoreFromData(cardData[id2])) /
-      2;
+    (wilsonScoreFromData(cardData[id1], 2) +
+        wilsonScoreFromData(cardData[id2], 2)) / 2;
 
   console.log(
     `${fmt(100 * ws)} (n=${card.count}, pure=${fmt(100 * wsPure)}): ${
       names[Number(id1)]
     }, ${names[Number(id2)]}`,
+  );
+}
+
+console.log("\n\nWorst card pairs (skipping basics, adjusted for many pairs):");
+for (
+  const [key, card] of nonLandPairs.toSorted((a, b) =>
+    wilsonScoreFromDataPair(Number(a[0]), a[1], true) -
+    wilsonScoreFromDataPair(Number(b[0]), b[1], true)
+  ).slice(0, 50)
+) {
+  const id1 = Math.floor(Number(key) / 1000);
+  const id2 = Number(key) % 1000;
+  const ws = wilsonScoreFromDataPair(Number(key), card, true);
+
+  const wsPure = ws +
+    (wilsonScoreFromData(cardData[id1], 2, true) +
+        wilsonScoreFromData(cardData[id2], 2, true)) / 2;
+
+  const unadjustedPure = card.outcome / card.count;
+  const unadjustedLift = unadjustedPure -
+    (cardData[id1].outcome / cardData[id1].count +
+        cardData[id2].outcome / cardData[id2].count) / 2;
+
+  console.log(
+    `${fmt(100 * ws)} (n=${card.count}, pure=${fmt(100 * wsPure)}, un.lift=${
+      fmt(100 * unadjustedLift)
+    }, un.pure=${fmt(100 * unadjustedPure)}): ${names[Number(id1)]}, ${
+      names[Number(id2)]
+    }`,
   );
 }
